@@ -1,0 +1,31 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        optics-version: [latest, "1.11.0"]
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: optics
+        uses: ./
+        with:
+          suite: examples/web
+          optics-version: ${{ matrix.optics-version }}
+          dry-run: true
+
+      - name: Check the JUnit output
+        env:
+          JUNIT: ${{ steps.optics.outputs.junit }}
+        run: grep -q 'failures="0"' "$JUNIT"

@@ -1,0 +1,112 @@
+name: Run Optics tests
+description: Run an Optics (optics-framework) test suite and publish its JUnit results to the job summary.
+author: optics-framework.org
+branding:
+  icon: eye
+  color: blue
+
+inputs:
+  suite:
+    description: Path to the Optics project folder (the one with config.yaml, test_cases/, modules/).
+    required: true
+  extras:
+    description: Comma-separated optics-framework extras (engines), e.g. "playwright", "selenium", "appium", "web", "playwright,easyocr".
+    required: false
+    default: playwright
+  optics-version:
+    description: optics-framework version to install, e.g. "1.11.0". "latest" installs the newest release.
+    required: false
+    default: latest
+  python-version:
+    description: Python version for actions/setup-python (Optics needs 3.12 or newer).
+    required: false
+    default: "3.12"
+  args:
+    description: Extra arguments appended to "optics execute".
+    required: false
+    default: ""
+  dry-run:
+    description: Run "optics dry_run" on the suite before executing it.
+    required: false
+    default: "false"
+
+outputs:
+  junit:
+    description: Path to the JUnit XML report written by the run.
+    value: ${{ steps.paths.outputs.junit }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v7
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - id: paths
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+      run: |
+        echo "junit=${SUITE%/}/execution_output/junit_output.xml" >> "$GITHUB_OUTPUT"
+        echo "output=${SUITE%/}/execution_output" >> "$GITHUB_OUTPUT"
+
+    - name: Install Optics
+      shell: bash
+      env:
+        EXTRAS: ${{ inputs.extras }}
+        VERSION: ${{ inputs.optics-version }}
+      run: |
+        spec="optics-framework"
+        [ -n "$EXTRAS" ] && spec="$spec[$EXTRAS]"
+        [ "$VERSION" != "latest" ] && spec="$spec==$VERSION"
+        python -m pip install --upgrade pip
+        python -m pip install "$spec"
+        # Playwright downloads its browser separately from the pip package.
+        if [[ ",$EXTRAS," =~ ,(playwright|web|all), ]]; then
+          python -m playwright install --with-deps chromium
+        fi
+        optics --version
+
+    - name: Validate the suite
+      if: inputs.dry-run == 'true'
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+      run: optics dry_run "$SUITE" --no-use-printer
+
+    - name: Run the suite
+      shell: bash
+      env:
+        SUITE: ${{ inputs.suite }}
+        ARGS: ${{ inputs.args }}
+        OUTPUT: ${{ steps.paths.outputs.output }}
+      run: |
+        rm -rf "$OUTPUT"
+        # A virtual display lets suites that set headless: false run on Linux runners.
+        wrap=()
+        if [ "$RUNNER_OS" = Linux ] && command -v xvfb-run >/dev/null; then wrap=(xvfb-run -a); fi
+        # ARGS is split on whitespace on purpose.
+        "${wrap[@]}" optics execute "$SUITE" --no-use-printer $ARGS
+
+    - name: Publish the JUnit summary
+      if: always()
+      shell: bash
+      env:
+        JUNIT: ${{ steps.paths.outputs.junit }}
+      run: python "$GITHUB_ACTION_PATH/summary.py" "$JUNIT" >> "$GITHUB_STEP_SUMMARY"
+
+    # Screenshot file names can contain colons, which upload-artifact rejects, so the folder goes up as one archive.
+    - name: Archive the run output
+      if: always()
+      shell: bash
+      env:
+        OUTPUT: ${{ steps.paths.outputs.output }}
+      run: |
+        if [ -d "$OUTPUT" ]; then tar -czf "$RUNNER_TEMP/optics-output.tgz" -C "$(dirname "$OUTPUT")" execution_output; fi
+
+    - if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: optics-output-${{ github.job }}-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/optics-output.tgz
+        if-no-files-found: warn
